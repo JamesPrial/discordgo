@@ -35,7 +35,7 @@ func encryptSecureFrame(frameCipher cipher.AEAD, nonce uint32, opusData []byte) 
 
 func buildNonce(counter uint32) []byte {
 	nonce := make([]byte, 12)
-	binary.LittleEndian.PutUint32(nonce[8:], counter)
+	binary.LittleEndian.PutUint32(nonce[:4], counter)
 	return nonce
 }
 

@@ -25,6 +25,8 @@ type DAVESession struct {
 	currentGeneration uint32
 	hasPendingKey     bool
 
+	onActive func() // called once when active becomes true; cleared after firing
+
 	kpBundle *mlsKeyPackageBundle
 }
 
@@ -32,6 +34,15 @@ func NewDAVESession(userID string) *DAVESession {
 	return &DAVESession{
 		userID: userID,
 	}
+}
+
+// SetOnActive sets a callback that fires once when DAVE becomes active.
+// Must be called before the handshake begins. The callback is invoked
+// while the session mutex is held — it must not re-acquire it.
+func (d *DAVESession) SetOnActive(fn func()) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.onActive = fn
 }
 
 func (d *DAVESession) GenerateKeyPackage() ([]byte, error) {
@@ -103,7 +114,7 @@ func (d *DAVESession) HandleExecuteTransition(transitionID uint16) error {
 
 	if transitionID != d.pendingTransitionID {
 		if d.senderKey != nil {
-			d.active = true
+			d.setActiveLocked(true)
 		}
 		return nil
 	}
@@ -130,7 +141,7 @@ func (d *DAVESession) HandleExecuteTransition(transitionID uint16) error {
 			return nil
 		}
 
-		d.active = true
+		d.setActiveLocked(true)
 	} else {
 		d.active = false
 		d.senderKey = nil
@@ -138,6 +149,17 @@ func (d *DAVESession) HandleExecuteTransition(transitionID uint16) error {
 		d.hasPendingKey = false
 	}
 	return nil
+}
+
+// setActiveLocked sets d.active and fires the onActive callback once.
+// Must be called while d.mu is held.
+func (d *DAVESession) setActiveLocked(active bool) {
+	wasActive := d.active
+	d.active = active
+	if active && !wasActive && d.onActive != nil {
+		d.onActive()
+		d.onActive = nil
+	}
 }
 
 func (d *DAVESession) HandlePrepareEpoch(epoch uint64, protocolVersion int) ([]byte, error) {
@@ -244,4 +266,5 @@ func (d *DAVESession) Reset() {
 	d.ratchetBaseSecret = nil
 	d.currentGeneration = 0
 	d.hasPendingKey = false
+	d.onActive = nil
 }

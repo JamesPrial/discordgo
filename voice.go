@@ -95,6 +95,8 @@ type VoiceConnection struct {
 
 	dave *DAVESession
 
+	daveReadyCh chan struct{} // closed when DAVE handshake completes; nil if no DAVE
+
 	pendingReWelcome bool
 
 	voiceSpeakingUpdateHandlers []VoiceSpeakingUpdateHandler
@@ -632,6 +634,12 @@ func (v *VoiceConnection) onEvent(ctx context.Context, binary bool, message []by
 			v.log(LogInformational, "DAVE protocol version %d", op4.DAVEProtocolVersion)
 			if op4.DAVEProtocolVersion > 0 {
 				v.dave = NewDAVESession(v.session.State.User.ID)
+				v.daveReadyCh = make(chan struct{})
+				daveReadyCh := v.daveReadyCh
+				v.dave.SetOnActive(func() {
+					// Called with DAVESession.mu held — do not acquire it again.
+					close(daveReadyCh)
+				})
 
 				var err error
 				daveKPData, err = v.dave.GenerateKeyPackage()
@@ -653,13 +661,35 @@ func (v *VoiceConnection) onEvent(ctx context.Context, binary bool, message []by
 				go v.opusReceiver(ctx)
 			}
 
-			v.Status = VoiceConnectionStatusReady
+			if op4.DAVEProtocolVersion > 0 {
+				// Defer Ready until DAVE handshake completes.
+				daveReadyCh := v.daveReadyCh
+				v.Cond.L.Unlock()
 
-			v.Cond.Broadcast()
-			v.Cond.L.Unlock()
+				if daveKPData != nil {
+					v.sendDAVEKeyPackageBinary(daveKPData)
+				}
 
-			if daveKPData != nil {
-				v.sendDAVEKeyPackageBinary(daveKPData)
+				// Wait for DAVE activation or timeout.
+				select {
+				case <-daveReadyCh:
+					v.log(LogInformational, "DAVE handshake complete, connection ready")
+				case <-time.After(10 * time.Second):
+					v.log(LogWarning, "DAVE handshake timed out, marking ready anyway")
+				case <-ctx.Done():
+					return
+				}
+
+				v.Cond.L.Lock()
+				if v.Status != VoiceConnectionStatusDead {
+					v.Status = VoiceConnectionStatusReady
+					v.Cond.Broadcast()
+				}
+				v.Cond.L.Unlock()
+			} else {
+				v.Status = VoiceConnectionStatusReady
+				v.Cond.Broadcast()
+				v.Cond.L.Unlock()
 			}
 			return
 
